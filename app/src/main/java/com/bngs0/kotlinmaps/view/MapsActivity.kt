@@ -1,6 +1,7 @@
 package com.bngs0.kotlinmaps.view
 
 import android.Manifest
+import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.location.Location
@@ -14,6 +15,7 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.room.Room
 import com.bngs0.kotlinmaps.R
 
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -23,7 +25,13 @@ import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.MarkerOptions
 import com.bngs0.kotlinmaps.databinding.ActivityMapsBinding
+import com.bngs0.kotlinmaps.model.Place
+import com.bngs0.kotlinmaps.roomdb.AppDatabase
+import com.bngs0.kotlinmaps.roomdb.PlaceDao
 import com.google.android.material.snackbar.Snackbar
+import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
+import io.reactivex.rxjava3.disposables.CompositeDisposable
+import io.reactivex.rxjava3.schedulers.Schedulers
 
 class MapsActivity : AppCompatActivity(), OnMapReadyCallback, GoogleMap.OnMapLongClickListener {
 
@@ -37,9 +45,13 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback, GoogleMap.OnMapLon
     var selectedLatitude: Double? = null
     var selectedLongitude: Double? = null
 
+    private lateinit var db : AppDatabase
+    private lateinit var placeDao: PlaceDao
+    val compositeDisposable = CompositeDisposable()
+    var placeForMain : Place? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         binding = ActivityMapsBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
@@ -47,6 +59,16 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback, GoogleMap.OnMapLon
         val mapFragment = supportFragmentManager
             .findFragmentById(R.id.map) as SupportMapFragment
         mapFragment.getMapAsync(this)
+
+        //Database
+        val db = Room.databaseBuilder(applicationContext, AppDatabase::class.java, "Place")
+            //.allowMainThreadQueries() // main thread'de iş yapmaya izin ver
+            .build()
+        placeDao = db.placeDao()
+
+        binding.saveButton.setOnClickListener { save(it) }
+        binding.deleteButton.setOnClickListener { delete(it) }
+
 
         registerLauncher()
 
@@ -62,55 +84,82 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback, GoogleMap.OnMapLon
         mMap = googleMap
         mMap.setOnMapLongClickListener(this)
 
-        locationManager = this.getSystemService(LOCATION_SERVICE) as LocationManager
+        //intentten gelen veri
+        val intent = intent
+        val info = intent.getStringExtra("info")
 
-        locationListener = object : LocationListener {
-            override fun onLocationChanged(location: Location) {
-                trackBoolean = sharedPreferences.getBoolean("track",false)
-                if (!trackBoolean!!){
-                    val userLocation = LatLng(location.latitude,location.longitude)
-                    mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(userLocation,15f))
-                    sharedPreferences.edit().putBoolean("track",true).apply()
+        if (info == "new"){
+            //mapte yeni bir yer seçeçecek
+            binding.saveButton.visibility = View.VISIBLE
+            binding.deleteButton.visibility = View.GONE //ekrandan yok ediyor, yer kaplamıyor
+
+            locationManager = this.getSystemService(LOCATION_SERVICE) as LocationManager
+
+            locationListener = object : LocationListener {
+                override fun onLocationChanged(location: Location) {
+                    trackBoolean = sharedPreferences.getBoolean("track",false)
+                    if (!trackBoolean!!){
+                        val userLocation = LatLng(location.latitude,location.longitude)
+                        mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(userLocation,15f))
+                        sharedPreferences.edit().putBoolean("track",true).apply()
+                    }
+
+
+                }
+            }
+
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                //konum izini iste
+                if (ActivityCompat.shouldShowRequestPermissionRationale(
+                        this,
+                        Manifest.permission.READ_EXTERNAL_STORAGE
+                    )
+                ) {
+                    Snackbar.make(
+                        binding.root,
+                        "Permission needed for location",
+                        Snackbar.LENGTH_INDEFINITE
+                    ).setAction("Give Permission") {
+                        permissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE) // konum izini
+                    }.show()
+                } else {
+                    permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) //konum izini
                 }
 
-
-            }
-        }
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            //konum izini iste
-            if (ActivityCompat.shouldShowRequestPermissionRationale(
-                    this,
-                    Manifest.permission.READ_EXTERNAL_STORAGE
-                )
-            ) {
-                Snackbar.make(
-                    binding.root,
-                    "Permission needed for location",
-                    Snackbar.LENGTH_INDEFINITE
-                ).setAction("Give Permission") {
-                    permissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE) // konum izini
-                }.show()
             } else {
-                permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) //konum izini
+                // konum izini var
+                locationManager.requestLocationUpdates(
+                    LocationManager.GPS_PROVIDER,
+                    0,
+                    0f,
+                    locationListener
+                )
+
+                val lastLocation = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                if (lastLocation != null){
+                    val lastUserLocation = LatLng(lastLocation.latitude,lastLocation.longitude)
+                    mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(lastUserLocation,15f))
+                }
+                mMap.isMyLocationEnabled = true
             }
 
-        } else {
-            // konum izini var
-            locationManager.requestLocationUpdates(
-                LocationManager.GPS_PROVIDER,
-                0,
-                0f,
-                locationListener
-            )
+        }else {
+            //eski kayıta gidiyor
+            mMap.clear()
+            placeForMain = intent.getSerializableExtra("place") as? Place
+            placeForMain?.let {
+                val latlng = LatLng(it.latitude!!, it.longitude!!)
+                mMap.addMarker(MarkerOptions().position(latlng).title(it.name))
+                mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latlng,15f))
 
-            val lastLocation = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-            if (lastLocation != null){
-                val lastUserLocation = LatLng(lastLocation.latitude,lastLocation.longitude)
-                mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(lastUserLocation,15f))
+                binding.placeText.setText(it.name) // EditText olduğu için text'i bu şekilde değiştiriyoruz
+                binding.saveButton.visibility = View.GONE
+                binding.deleteButton.visibility = View.VISIBLE
             }
-            mMap.isMyLocationEnabled = true
+
         }
+
+
 
 
         //eiffel tower'a zoom
@@ -148,10 +197,39 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback, GoogleMap.OnMapLon
     }
 
     private fun save(view: View){
+        val place = Place(binding.placeText.text.toString(), selectedLatitude, selectedLongitude)
+        //placeDao.insert(place) main theradde çalışacağı için uygulama çöker
+
+        compositeDisposable.add(
+            placeDao.insert(place)
+                .subscribeOn(Schedulers.io())
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(this:: handleResponse) // db'ye aldıktan sonra handleResponse çalışacak
+        )
+
+    }
+
+    private fun handleResponse(){
+        val intent = Intent(this@MapsActivity, MainActivity :: class.java)
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP) // her şeyi temizleme
+        startActivity(intent)
 
     }
 
     private fun delete(view: View){
+        placeForMain?.let {
+            compositeDisposable.add(
+                placeDao.delete(placeForMain!!)
+                    .subscribeOn(Schedulers.io())
+                    .observeOn(AndroidSchedulers.mainThread())
+                    .subscribe(this::handleResponse)
+            )
+        }
 
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        compositeDisposable.clear()
     }
 }
